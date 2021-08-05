@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -17,9 +17,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
-	"github.com/go-xorm/xorm"
 	"gopkg.in/macaron.v1"
+	"xorm.io/xorm"
+	logx "xorm.io/xorm/log"
 
 	_ "github.com/lib/pq"
 )
@@ -65,7 +65,7 @@ func StartXormEngine() {
 	if err != nil {
 		log.Println(err)
 	}
-	logger := xorm.NewSimpleLogger(logFile)
+	logger := logx.NewSimpleLogger(logFile)
 	logger.ShowSQL(true)
 	engine.SetLogger(logger)
 
@@ -76,116 +76,84 @@ func StartXormEngine() {
 
 // Handler Functions....
 
-func Welcome(w http.ResponseWriter, r *http.Request) {
+func Welcome(ctx *macaron.Context) {
 	start := time.Now()
-	if err := json.NewEncoder(w).Encode("Congratulations...! Your API Server is up and running... :) "); err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	ctx.JSON(http.StatusOK, "Congratulations...! Your API Server is up and running... :) ")
 
-	w.WriteHeader(http.StatusOK)
 	duration := time.Since(start)
 	promHttpRequestTotal.With(prometheus.Labels{"url": "/", "method": "GET", "code": strconv.Itoa(http.StatusOK)}).Inc()
 	promHttpRequestDurationSeconds.With(prometheus.Labels{"url": "/", "method": "GET"}).Observe(duration.Seconds())
 }
 
-func WelcomeToAppsCode(w http.ResponseWriter, r *http.Request) {
+func WelcomeToAppsCode(ctx *macaron.Context) {
 	start := time.Now()
-	if err := json.NewEncoder(w).Encode("Welcome to AppsCode Ltd.. Available Links are : `/appscode/workers`, `/appscode/workers/{username}`"); err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	ctx.JSON(http.StatusOK, "Welcome to AppsCode Ltd.. Available Links are : `/appscode/workers`, `/appscode/workers/{username}`")
 
-	w.WriteHeader(http.StatusOK)
 	duration := time.Since(start)
 	promHttpRequestTotal.With(prometheus.Labels{"url": "/appscode/", "method": "GET", "code": strconv.Itoa(http.StatusOK)}).Inc()
 	promHttpRequestDurationSeconds.With(prometheus.Labels{"url": "/appscode/", "method": "GET"}).Observe(duration.Seconds())
 }
 
-func ShowAllWorkers(w http.ResponseWriter, r *http.Request) {
+func ShowAllWorkers(ctx *macaron.Context) {
 	start := time.Now()
 	var workers []Worker
 	if err := engine.Find(&workers); err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 	}
 
-	if err := json.NewEncoder(w).Encode(workers); err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-	}
+	ctx.JSON(http.StatusOK, workers)
 
-	w.WriteHeader(http.StatusOK)
 	duration := time.Since(start)
 	promHttpRequestTotal.With(prometheus.Labels{"url": "/appscode/workers/", "method": "GET", "code": strconv.Itoa(http.StatusOK)}).Inc()
 	promHttpRequestDurationSeconds.With(prometheus.Labels{"url": "/appscode/workers/", "method": "GET"}).Observe(duration.Seconds())
 }
 
-func ShowSingleWorker(ctx *macaron.Context, w http.ResponseWriter, r *http.Request) {
+func ShowSingleWorker(ctx *macaron.Context) {
 	start := time.Now()
 	worker := new(Worker)
 	worker.Username = ctx.Params("username")
 	exist, err := engine.Get(worker)
 	if err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 	} else if !exist {
-		w.WriteHeader(http.StatusNotFound)
-		if _, err := w.Write([]byte("404 - Content Not Found")); err != nil {
-			log.Println(err)
-		}
+		ctx.Error(http.StatusNotFound, "404 - Content Not Found")
 		return
 	}
-	if err := json.NewEncoder(w).Encode(worker); err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-	}
 
-	w.WriteHeader(http.StatusOK)
+	ctx.JSON(http.StatusOK, worker)
+
 	duration := time.Since(start)
 	promHttpRequestTotal.With(prometheus.Labels{"url": fmt.Sprintf("/appscode/workers/%s/", worker.Username), "method": "GET", "code": strconv.Itoa(http.StatusOK)}).Inc()
 	promHttpRequestDurationSeconds.With(prometheus.Labels{"url": fmt.Sprintf("/appscode/workers/%s/", worker.Username), "method": "GET"}).Observe(duration.Seconds())
 }
 
-func AddNewWorker(w http.ResponseWriter, r *http.Request) {
+func AddNewWorker(ctx *macaron.Context, worker Worker) {
 	start := time.Now()
-	var worker Worker
-	if err := json.NewDecoder(r.Body).Decode(&worker); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		if _, err := w.Write([]byte("Error decoding provided data")); err != nil {
-			log.Println(err)
-		}
-		return
-	}
 
 	if worker.Username == "" {
-		w.WriteHeader(http.StatusNotFound)
-		if _, err := w.Write([]byte("Username must be provided")); err != nil {
-			log.Println(err)
-		}
+		ctx.Error(http.StatusNotAcceptable, "Username must be provided")
 		return
 	}
 
 	newWorker := new(Worker)
 	newWorker.Username = worker.Username
-	if exist, _ := engine.Get(newWorker); exist {
-		w.WriteHeader(http.StatusConflict)
-		if _, err := w.Write([]byte("409 - username already exists")); err != nil {
-			log.Println(err)
-		}
+	if exist, err := engine.Get(newWorker); err != nil {
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
+	} else if exist {
+		ctx.Error(http.StatusConflict)
 	}
 
 	// Check if it exists in deleted accounts
 	newWorker = new(Worker)
 	newWorker.Username = worker.Username
-	if exist, _ := engine.Unscoped().Get(newWorker); exist {
-		w.WriteHeader(http.StatusConflict)
-		if _, err := w.Write([]byte("409 - username already exists")); err != nil {
-			log.Println(err)
-		}
+	if exist, err := engine.Unscoped().Get(newWorker); err != nil {
+		ctx.Error(http.StatusInternalServerError, err.Error())
+		return
+	} else if exist {
+		ctx.Error(http.StatusConflict)
 		return
 	}
 
@@ -194,62 +162,46 @@ func AddNewWorker(w http.ResponseWriter, r *http.Request) {
 
 	if err := session.Begin(); err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	}
 	if _, err := session.Insert(&worker); err != nil {
 		if err = session.Rollback(); err != nil {
 			log.Println(err)
-			w.WriteHeader(http.StatusInternalServerError)
+			ctx.Error(http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
 
 	if err := session.Commit(); err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(worker); err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-	}
+
+	ctx.JSON(http.StatusCreated, worker)
+
 	duration := time.Since(start)
 	promHttpRequestTotal.With(prometheus.Labels{"url": "/appscode/workers/", "method": "POST", "code": strconv.Itoa(http.StatusOK)}).Inc()
 	promHttpRequestDurationSeconds.With(prometheus.Labels{"url": "/appscode/workers/", "method": "POST"}).Observe(duration.Seconds())
 }
 
-func UpdateWorkerProfile(ctx *macaron.Context, w http.ResponseWriter, r *http.Request) {
+func UpdateWorkerProfile(ctx *macaron.Context, newWorker Worker) {
 	start := time.Now()
 	worker := new(Worker)
 	worker.Username = ctx.Params("username")
 	exist, err := engine.Get(worker)
 	if err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	} else if !exist {
-		w.WriteHeader(http.StatusNotFound)
-		if _, err := w.Write([]byte("404 - Content Not Found")); err != nil {
-			log.Println(err)
-		}
+		ctx.Error(http.StatusNotFound)
 		return
 	}
 
-	newWorker := new(Worker)
-	if err := json.NewDecoder(r.Body).Decode(newWorker); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		if _, err := w.Write([]byte("Error decoding provided data")); err != nil {
-			log.Println(err)
-		}
-		return
-	}
 	if newWorker.Username != worker.Username {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		if _, err := w.Write([]byte("405 - Username can't be changed")); err != nil {
-			log.Println(err)
-		}
+		ctx.Error(http.StatusMethodNotAllowed, "405 - Username can't be changed")
 		return
 	}
 
@@ -269,7 +221,7 @@ func UpdateWorkerProfile(ctx *macaron.Context, w http.ResponseWriter, r *http.Re
 
 	if err := session.Begin(); err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -277,43 +229,34 @@ func UpdateWorkerProfile(ctx *macaron.Context, w http.ResponseWriter, r *http.Re
 		log.Println(err)
 		if err = session.Rollback(); err != nil {
 			log.Println(err)
-			w.WriteHeader(http.StatusInternalServerError)
+			ctx.Error(http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
 
 	if err := session.Commit(); err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	if _, err := w.Write([]byte("201 - Updated successfully")); err != nil {
-		log.Println(err)
-	}
-	/*if err := json.NewEncoder(w).Encode(worker); err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-	}*/
+	ctx.JSON(http.StatusOK, worker)
+
 	duration := time.Since(start)
 	promHttpRequestTotal.With(prometheus.Labels{"url": fmt.Sprintf("/appscode/workers/%s/", worker.Username), "method": "PUT", "code": strconv.Itoa(http.StatusOK)}).Inc()
 	promHttpRequestDurationSeconds.With(prometheus.Labels{"url": fmt.Sprintf("/appscode/workers/%s/", worker.Username), "method": "PUT"}).Observe(duration.Seconds())
 }
 
-func DeleteWorker(ctx *macaron.Context, w http.ResponseWriter, r *http.Request) {
+func DeleteWorker(ctx *macaron.Context) {
 	start := time.Now()
 	worker := new(Worker)
 	worker.Username = ctx.Params("username")
 	exist, err := engine.Get(worker)
 	if err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	} else if !exist {
-		w.WriteHeader(http.StatusNotFound)
-		if _, err := w.Write([]byte("404 - Content Not Found")); err != nil {
-			log.Println(err)
-		}
+		ctx.Error(http.StatusNotFound)
 		return
 	}
 
@@ -322,7 +265,7 @@ func DeleteWorker(ctx *macaron.Context, w http.ResponseWriter, r *http.Request) 
 
 	if err := session.Begin(); err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -330,21 +273,19 @@ func DeleteWorker(ctx *macaron.Context, w http.ResponseWriter, r *http.Request) 
 		log.Println(err)
 		if err = session.Rollback(); err != nil {
 			log.Println(err)
-			w.WriteHeader(http.StatusInternalServerError)
+			ctx.Error(http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
 
 	if err := session.Commit(); err != nil {
 		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.Error(http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte("200 - Deleted Successfully")); err != nil {
-		log.Println(err)
-	}
+	ctx.Status(http.StatusOK)
+
 	duration := time.Since(start)
 	promHttpRequestTotal.With(prometheus.Labels{"url": fmt.Sprintf("/appscode/workers/%s/", worker.Username), "method": "DELETE", "code": strconv.Itoa(http.StatusOK)}).Inc()
 	promHttpRequestDurationSeconds.With(prometheus.Labels{"url": fmt.Sprintf("/appscode/workers/%s/", worker.Username), "method": "DELETE"}).Observe(duration.Seconds())
@@ -426,13 +367,13 @@ func CreateInitialWorkerProfile() {
 
 }
 
-func basicAuth(ctx *macaron.Context) (bool, []byte) {
+func basicAuth(ctx *macaron.Context) (bool, error) {
 	if byPass {
 		return true, nil
 	}
 	authHeader := ctx.Req.Header.Get("Authorization")
 	if authHeader == "" {
-		return false, []byte("Authorization Needed...!")
+		return false, errors.New("Authorization Needed...!")
 	}
 
 	authInfo := strings.SplitN(authHeader, " ", 2)
@@ -440,22 +381,30 @@ func basicAuth(ctx *macaron.Context) (bool, []byte) {
 	userInfo, err := base64.StdEncoding.DecodeString(authInfo[1])
 
 	if err != nil {
-		return false, []byte("Error while decoding...!")
+		return false, errors.New("Error while decoding...!")
 	}
 	userPass := strings.SplitN(string(userInfo), ":", 2)
 
 	if len(userPass) != 2 {
-		return false, []byte("Authorization failed...!")
+		return false, errors.New("Authorization failed...!")
 	}
 
 	if pass, exist := authUser[userPass[0]]; exist {
 		if pass != userPass[1] {
-			return false, []byte("Unauthorized User")
+			return false, errors.New("Unauthorized User")
 		} else {
 			return true, nil
 		}
 	} else {
-		return false, []byte("Authorization failed...!")
+		return false, errors.New("Authorization failed...!")
+	}
+}
+
+func reqAuthentication() macaron.Handler {
+	return func(ctx *macaron.Context) {
+		if authorized, err := basicAuth(ctx); !authorized {
+			ctx.Error(http.StatusUnauthorized, err.Error())
+		}
 	}
 }
 
@@ -467,6 +416,7 @@ func AssignValues(port string, bypass bool, stop int16) {
 
 func StartTheApp() {
 	m := macaron.Classic()
+	m.Use(macaron.Renderer())
 
 	var wait time.Duration
 	flag.DurationVar(&wait, "graceful-timeout", time.Second*15, "the duration for which the server gracefully wait for existing connections to finish - e.g. 15s or 1m")
@@ -490,19 +440,10 @@ func StartTheApp() {
 			m.Post("/", AddNewWorker)
 			m.Put("/:username", UpdateWorkerProfile)
 			m.Delete("/:username", DeleteWorker)
-		})
+		}, reqAuthentication())
 	})
 
 	m.Get("/metrics", promhttp.HandlerFor(prom, promhttp.HandlerOpts{}))
-
-	m.Use(func(ctx *macaron.Context) {
-		if authorized, errMsg := basicAuth(ctx); !authorized {
-			ctx.Resp.WriteHeader(http.StatusUnauthorized)
-			if _, err := ctx.Resp.Write(errMsg); err != nil {
-				log.Println(err)
-			}
-		}
-	})
 
 	log.Printf("Starting the server at 127.0.0.1%s\n", srvr.Addr)
 
